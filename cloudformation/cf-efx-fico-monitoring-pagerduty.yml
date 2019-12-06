@@ -1,0 +1,173 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: The AWS CloudFormation template for creating Cloudwatch Dashboard and Alarms.
+
+Parameters:
+  IamRolePermissionBoundaryPolicy:
+    Description: 'Permission boundary policy for lambda IAM role'
+    Type: String
+    Default: arn:aws:iam::977903870127:policy/efx-cloud-developerpoweruser-boundary-policy
+  LambdaCodeS3BucketName:
+    Type: String
+    Description: S3 bucket key for lambda code zip
+    Default: ignite-dms-dev-02
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 bucket key for lambda code zip
+    Default: code/efx-fico-alert-message-transformer-lambda/package-1.0.zip
+  PagerDutyWebhook:
+    Type: String
+    Description: Pager Duty Webhook to which notifications are to be delivered
+    Default: https://pagerduty-alert.com
+
+Resources:
+  FicoMonitoringTopicKmsKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: KMS key to encrypt messages sent to the topic
+      Enabled: True
+      EnableKeyRotation: False
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: efx-fico-monitoring-topic-key
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join 
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: kms:*
+            Resource: '*'
+      Tags: 
+        - Key: name
+          Value: efx-fico-monitoring-topic
+        - Key: project_name
+          Value: FICO
+
+  FicoMonitoringTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      DisplayName: efx-fico-monitoring-topic
+      KmsMasterKeyId: !Ref FicoMonitoringTopicKmsKey
+      Subscription: 
+        - Endpoint: !Ref PagerDutyWebhook
+          Protocol: https
+      Tags: 
+        - Key: name
+          Value: efx-fico-monitoring-topic
+        - Key: project_name
+          Value: FICO
+      TopicName: efx-fico-monitoring-topic
+
+  FicoMonitoringEventRule:
+    Type: AWS::Events::Rule
+    Properties: 
+      Description: Rule to intercept CloudWatch alarm events
+      EventPattern:
+        source: 
+          - aws.cloudwatch
+        detail-type: 
+          - CloudWatch Alarm State Change
+        detail:
+          state:
+            value: 
+              - ALARM
+      Name: efx-fico-monitoring-rule
+      State: ENABLED
+      Targets: 
+        - Arn: !GetAtt FicoAlertMessageTransformerLambda.Arn
+          Id: !Ref FicoAlertMessageTransformerLambda
+  
+  PermissionForEventsToInvokeLambda: 
+    Type: AWS::Lambda::Permission
+    Properties: 
+      FunctionName: !Ref FicoAlertMessageTransformerLambda
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt FicoMonitoringEventRule.Arn
+
+  FicoAlertMessageTransformerLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: delegate-admin-efx-cloud-fico-alert-msg-transform-lambda-role
+      PermissionsBoundary: !Ref IamRolePermissionBoundaryPolicy
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  FicoAlertMessageTransformerLambdaPolicy:
+    Type: AWS::IAM::Policy
+    Properties:
+      PolicyName: delegate-admin-efx-cloud-fico-alert-msg-transform-lambda-policy
+      Roles:
+        - !Ref FicoAlertMessageTransformerLambdaRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Action:
+              - logs:CreateLogGroup
+              - logs:CreateLogStream
+              - logs:PutLogEvents
+            Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+          - Effect: Allow
+            Action:
+              - sns:Publish
+            Resource:
+              - !Ref FicoMonitoringTopic
+          - Effect: Allow
+            Action:
+              - kms:encrypt
+              - kms:decrypt
+              - kms:ReEncrypt*
+              - kms:GenerateDataKey*
+              - kms:DescribeKey
+            Resource: !GetAtt FicoMonitoringTopicKmsKey.Arn
+
+  FicoAlertMessageTransformerLambda:
+    DependsOn:
+      - FicoAlertMessageTransformerLambdaPolicy
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: efx-fico-alert-message-transform-lambda
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      Description: Transform alert message format and publish to SNS topic
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt FicoAlertMessageTransformerLambdaRole.Arn
+      KmsKeyArn: !GetAtt FicoMonitoringTopicKmsKey.Arn
+      Environment: 
+        Variables:
+          SNS_TOPIC_ARN: !Ref FicoMonitoringTopic
+      Tags:
+        - Key: name
+          Value: efx-fico-alert-message-transform-lambda
+        - Key: project_name
+          Value: FICO
+      Code:
+        S3Bucket: !Ref LambdaCodeS3BucketName
+        S3Key: !Ref LambdaCodeS3Key
+
+Outputs:
+  OutFicoAlertMessageTransformerLambdaArn:
+    Description: Fico Alert Message Transformer Lambda ARN
+    Value: !GetAtt FicoAlertMessageTransformerLambda.Arn
+    Export:
+      Name: efx-FicoAlertMessageTransformerLambdaArn
+
+  OutEMRMonitoringLambdaRoleArn:
+    Description: Fico Alert Message Transformer Lambda Role ARN
+    Value: !GetAtt FicoAlertMessageTransformerLambdaRole.Arn
+    Export:
+      Name: efx-FicoAlertMessageTransformerLambdaRoleArn
