@@ -3,10 +3,6 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: The AWS CloudFormation template for creating Cloudwatch Dashboard and Alarms.
 
 Parameters:
-  IamRolePermissionBoundaryPolicy:
-    Description: 'Permission boundary policy for lambda IAM role'
-    Type: String
-    Default: arn:aws:iam::977903870127:policy/efx-cloud-developerpoweruser-boundary-policy
   LambdaCodeS3BucketName:
     Type: String
     Description: S3 bucket key for lambda code zip
@@ -93,7 +89,6 @@ Resources:
     Type: AWS::IAM::Role
     Properties:
       RoleName: delegate-admin-efx-cloud-fico-alert-msg-transform-lambda-role
-      PermissionsBoundary: !Ref IamRolePermissionBoundaryPolicy
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
