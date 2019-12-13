@@ -20,7 +20,6 @@ Parameters:
   PagerDutyWebhook:
     Type: String
     Description: Pager Duty Webhook to which notifications are to be delivered
-    Default: https://events.pagerduty.com/integration/1a48b5471b5e41d082a5ed4c78842049/enqueue
 
 Resources:
   PagerDutyMonitoringTopicKmsKey:
