@@ -1,0 +1,146 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: The AWS SAM CloudFormation template for deploying Lambda and its associated cloudwatch event mapping.
+
+Transform: AWS::Serverless-2016-10-31
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: cloudwatch-pagerduty
+    Description: Enter name of your project
+  Stage:
+    Type: String
+    Description: Enter deployment stage for your project.
+    Default: DEV
+    AllowedValues:
+      - DEV
+      - STAGE
+      - PROD
+  PagerDutyWebhook:
+    Type: String
+    Description: Pager Duty Webhook to which notifications are to be delivered
+    Default: https://events.pagerduty.com/integration/1a48b5471b5e41d082a5ed4c78842049/enqueue
+
+Resources:
+  PagerDutyMonitoringTopicKmsKey:
+    Type: AWS::KMS::Key
+    Properties: 
+      Description: KMS key to encrypt messages sent to the topic
+      Enabled: True
+      EnableKeyRotation: False
+      KeyPolicy:
+        Version: 2012-10-17
+        Id: !Sub ${ProjectName}-monitoring-topic-key
+        Statement:
+          - Sid: Enable IAM User Permissions
+            Effect: Allow
+            Principal:
+              AWS: !Join 
+                - ''
+                - - 'arn:aws:iam::'
+                  - !Ref 'AWS::AccountId'
+                  - ':root'
+            Action: kms:*
+            Resource: '*'
+      Tags: 
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref ProjectName
+
+  PagerDutyMonitoringTopic:
+    Type: AWS::SNS::Topic
+    Properties: 
+      DisplayName: !Sub ${ProjectName}-monitoring-topic
+      KmsMasterKeyId: !Ref PagerDutyMonitoringTopicKmsKey
+      Subscription: 
+        - Endpoint: !Ref PagerDutyWebhook
+          Protocol: https
+      Tags: 
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref ProjectName
+      TopicName: !Sub ${ProjectName}-monitoring-topic
+
+  IamRoleLambdaExecution:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${ProjectName}-lambda-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - lambda.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${ProjectName}-lambda-policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/lambda/*
+              - Effect: Allow
+                Action:
+                  - sns:Publish
+                Resource:
+                  - !Ref PagerDutyMonitoringTopic
+              - Effect: Allow
+                Action:
+                  - cloudwatch:DescribeAlarms
+                Resource: '*'
+              - Effect: Allow
+                Action:
+                  - kms:encrypt
+                  - kms:decrypt
+                  - kms:ReEncrypt*
+                  - kms:GenerateDataKey*
+                  - kms:DescribeKey
+                Resource: !GetAtt PagerDutyMonitoringTopicKmsKey.Arn
+
+  LambdaFunction:
+    Type: AWS::Serverless::Function
+    Properties:
+      Handler: index.lambda_handler
+      Runtime: python3.7
+      CodeUri: package.zip
+      FunctionName: !Sub ${ProjectName}-lambda-${Stage}
+      Description: Format and Send CloudWatch Monitoring alerts to Pager Duty via SNS
+      Environment: 
+        Variables:
+          SNS_TOPIC_ARN: !Ref PagerDutyMonitoringTopic
+      MemorySize: 128
+      Timeout: 300
+      Role: !GetAtt IamRoleLambdaExecution.Arn
+      AutoPublishAlias: live
+      DeploymentPreference:
+        Enabled: true
+        Type: AllAtOnce
+      Events:
+        PagerDutyCloudWatchEvent:
+          Type: CloudWatchEvent
+          Properties:
+            Pattern:
+              source: 
+                - aws.cloudwatch
+              detail-type: 
+                - CloudWatch Alarm State Change
+      Tags:
+        project_name: !Ref ProjectName
+        category: goldmine
+
+Outputs:
+  OutLambdaArn:
+    Description: Lambda Function Arn
+    Value: !GetAtt LambdaFunction.Arn
+    Export:
+      Name: !Sub Goldmine-${ProjectName}-Lambda-${Stage}-Arn

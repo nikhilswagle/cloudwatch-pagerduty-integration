@@ -1,0 +1,54 @@
+version: 0.2
+
+phases:
+  install:
+    runtime-versions:
+      python: 3.7
+    commands:
+      - echo "Install Prequisites"
+      # Parameters passed by the pipeline
+      - echo $S3_DEPLOYMENT_BUCKET
+      - echo $CF_EXECUTION_ROLE
+      - echo $KMS_KEY_ID
+      # Folder that will hold final build artifacts
+      - mkdir -p /final-build-location
+      # Install SAM CLI
+      - apt-get update
+      - python --version
+      - pip --version
+      - pip install --user aws-sam-cli
+      - USER_BASE_PATH=$(python3 -m site --user-base)
+      - export PATH=$PATH:$USER_BASE_PATH/bin
+      - sam --version
+  build:
+    commands:
+      - echo "Start Building"
+      - cd $CODEBUILD_SRC_DIR/lambda
+      # Package python dependency into the zip file
+      - zip -r /final-build-location/package.zip *.*
+      - cp -r $CODEBUILD_SRC_DIR/cloudformation/cf-goldmine-CloudWatchPagerDutySAM.yml /final-build-location
+      - cp -r $CODEBUILD_SRC_DIR/deployment/codepipeline/buildspec-deploy.yml /final-build-location
+      - cp $CODEBUILD_SRC_DIR/cloudformation/cf-goldmine-CloudWatchPagerDutySAM.json /final-build-location
+      - ls /final-build-location
+      # Set Up Profile
+      - aws configure --profile deploy-profile set region us-east-1
+      - aws configure --profile deploy-profile set credential_source EcsContainer
+      - aws configure --profile deploy-profile set role_session_name $(date '+%Y%m%d%H%M%S%3N')
+      - aws configure --profile deploy-profile set role_arn $CF_EXECUTION_ROLE
+      # SAM Package
+      - cd /final-build-location
+      - |
+        sam package \
+        --template-file ./cf-goldmine-CloudWatchPagerDutySAM.yml \
+        --s3-bucket $S3_DEPLOYMENT_BUCKET \
+        --s3-prefix DEV \
+        --kms-key-id $KMS_KEY_ID \
+        --output-template-file ./package.yaml \
+        --profile deploy-profile
+      - echo "Build complete"
+artifacts:
+  files:
+    - package.yaml
+    - cf-goldmine-CloudWatchPagerDutySAM.json
+  discard-paths: no
+  base-directory: /final-build-location

@@ -1,0 +1,717 @@
+AWSTemplateFormatVersion: 2010-09-09
+
+Description: The AWS CloudFormation template for building a CICD pipeline for deploying microservice.
+
+Parameters:
+  # Project Name
+  Project:
+    Type: String
+    Description: Name of the project you want to deploy via this pipeline
+    Default: cloudwatch-pagerduty
+    MaxLength: 30
+  # Source Repo for the pipeline
+  CodeCommitRepoName:
+    Type: String
+    Description: Name of the code commit repo you want to create
+    Default: cloudwatch-pagerduty-repo
+    MaxLength: 30
+  # Source Branch for pipeline
+  CodeCommitRepoBranch:
+    Type: String
+    Description: Enter the branch name of code commit repo.
+    Default: master
+    AllowedValues:
+      - develop
+      - release
+      - master
+
+Mappings: 
+  GenericMap: 
+    StackToBeDeployed: 
+      Name: cf-goldmine-CloudWatchPagerDutySAM
+
+Resources:
+  ################################ CODECOMMIT REPO ################################
+  # You may pass your own repo name as a parameter instead of creating a new one.
+  CodeCommitRepo:
+    Type: AWS::CodeCommit::Repository
+    Properties:
+      RepositoryDescription: Repo For CloudWatch Pageduty Integration Lambda
+      RepositoryName: !Ref CodeCommitRepoName
+  ################################ END CODECOMMIT REPO ################################
+
+  CodeBuild:
+    DependsOn: 
+      - CodeBuildPolicy
+    Type: AWS::CodeBuild::Project
+    Properties:
+      Name: !Join [ '-', [ 'CodeBuild', !GetAtt CodeCommitRepo.Name, !Join [ '-', !Split [ '/', !Ref CodeCommitRepoBranch ] ] ]]
+      Artifacts:
+        Type: CODEPIPELINE
+      Source:
+        BuildSpec: deployment/codepipeline/buildspec.yml
+        Type: CODEPIPELINE
+      ServiceRole: !GetAtt CodeBuildRole.Arn
+      Environment:
+        Type: LINUX_CONTAINER
+        # Image: aws/codebuild/nodejs:8.11.0
+        Image: aws/codebuild/standard:2.0
+        ComputeType: BUILD_GENERAL1_SMALL
+        EnvironmentVariables:
+          -
+            Name: S3_DEPLOYMENT_BUCKET
+            Type: PLAINTEXT
+            Value: !Ref ServerlessDeploymentS3Bucket
+          -
+            Name: CF_EXECUTION_ROLE
+            Type: PLAINTEXT
+            Value: !GetAtt CFExecutionRole.Arn
+          -
+            Name: KMS_KEY_ID
+            Type: PLAINTEXT
+            Value: !Ref CodePipelineKMSKey
+      Tags:
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref Project
+
+  CodePipeline:
+    DependsOn: 
+      - CodePipelinePolicy
+    Type: AWS::CodePipeline::Pipeline
+    Properties:
+      Name: !Join [ '-', [ 'CodePipeline', !GetAtt CodeCommitRepo.Name, !Join [ '-', !Split [ '/', !Ref CodeCommitRepoBranch ] ] ]]
+      ArtifactStore:
+        Location: !Ref CodePipelineS3Bucket
+        Type: S3
+      RestartExecutionOnUpdate: True
+      RoleArn: !GetAtt CodePipelineRole.Arn
+      Stages:
+        - Name: Source
+          Actions:
+            - Name: Source
+              ActionTypeId:
+                Category: Source
+                Owner: AWS
+                Provider: CodeCommit
+                Version: 1
+              RunOrder: 10
+              OutputArtifacts:
+                - Name: SourceArtifact
+              Configuration:
+                BranchName: !Ref CodeCommitRepoBranch
+                PollForSourceChanges: False
+                RepositoryName: !GetAtt CodeCommitRepo.Name
+        - Name: Build
+          Actions:
+            - Name: Build
+              ActionTypeId:
+                Category: Build
+                Owner: AWS
+                Provider: CodeBuild
+                Version: 1
+              RunOrder: 10
+              InputArtifacts:
+                - Name: SourceArtifact
+              OutputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ProjectName: !Ref CodeBuild
+        - Name: Deploy
+          Actions:
+            - Name: Serverless-Create-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              RunOrder: 10
+              RoleArn: !GetAtt CFExecutionRole.Arn
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ActionMode: CHANGE_SET_REPLACE
+                StackName: !FindInMap [ GenericMap, StackToBeDeployed, Name ]
+                ChangeSetName: !Join [ '', [ !FindInMap [ GenericMap, StackToBeDeployed, Name ], '-Changeset' ] ]
+                Capabilities: CAPABILITY_NAMED_IAM
+                TemplatePath: BuildArtifact::package.yaml
+                TemplateConfiguration: BuildArtifact::cf-goldmine-CloudWatchPagerDutySAM.json
+                RoleArn: !GetAtt CFExecutionRole.Arn
+            - Name: Serverless-Execute-ChangeSet
+              ActionTypeId:
+                Category: Deploy
+                Owner: AWS
+                Provider: CloudFormation
+                Version: 1
+              RunOrder: 20
+              RoleArn: !GetAtt CFExecutionRole.Arn
+              InputArtifacts:
+                - Name: BuildArtifact
+              Configuration:
+                ActionMode: CHANGE_SET_EXECUTE
+                StackName: !FindInMap [ GenericMap, StackToBeDeployed, Name ]
+                ChangeSetName: !Join [ '', [ !FindInMap [ GenericMap, StackToBeDeployed, Name ], '-Changeset' ] ]
+                RoleArn: !GetAtt CFExecutionRole.Arn
+
+  CodeCheckinCloudWatchEvent:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: CloudWatch event rule to trigger CICD pipeline upon code check into code commit repo
+      EventPattern:
+        source:
+          - aws.codecommit
+        detail-type:
+          - "CodeCommit Repository State Change"
+        resources:
+          - !GetAtt CodeCommitRepo.Arn
+        detail:
+          event:
+            - referenceCreated
+            - referenceUpdated
+          referenceType:
+            - branch
+          referenceName:
+            - !Ref CodeCommitRepoBranch
+      Name: !Join [ '-', [ !Sub 'event-${CodeCommitRepo.Name}', !Join [ '-', !Split [ '/', !Ref CodeCommitRepoBranch ] ] ]]
+      State: ENABLED
+      Targets:
+        -
+          Arn: !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:${CodePipeline}
+          Id: !Ref CodePipeline
+          RoleArn: !GetAtt CloudWatchPipelineTriggerRole.Arn
+
+  ############################# PRE-REQUISITES FOR PIPELINE ################################
+  ServerlessDeploymentS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub ${Project}-deployment-bucket-${AWS::AccountId}
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: LccRule1-ExpireAllNoncurrentIn8Days
+            NoncurrentVersionExpirationInDays: 8
+            Prefix: ''
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration :
+          -
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !GetAtt CodePipelineKMSKey.Arn
+              SSEAlgorithm: aws:kms
+      Tags:
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref Project
+
+  ServerlessDeploymentS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ServerlessDeploymentS3Bucket
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${ServerlessDeploymentS3Bucket}
+              - !Sub arn:aws:s3:::${ServerlessDeploymentS3Bucket}/*
+            Principal:
+              AWS:
+                - !GetAtt CodePipelineRole.Arn
+          -
+            Action:
+              - s3:List*
+              - s3:Get*
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${ServerlessDeploymentS3Bucket}/*
+            Principal:
+              AWS:
+                - !GetAtt CFExecutionRole.Arn
+
+  CodePipelineKMSKey:
+    Type: AWS::KMS::Key
+    Properties:
+      Description: KMS key for pipeline S3 bucket encryption
+      Enabled: true
+      EnableKeyRotation: true
+      KeyPolicy:
+          Version: '2012-10-17'
+          Id: !Sub ${Project}-codepipeline-key
+          Statement:
+            - Sid: KmsAllowKeyAdministration
+              Effect: Allow
+              Principal:
+                AWS:
+                  - !Sub arn:aws:iam::${AWS::AccountId}:root
+              Action:
+                - 'kms:*'
+              Resource: '*'
+            - Sid: KmsAllowKeyUsage
+              Effect: Allow
+              Principal:
+                AWS:
+                  - !GetAtt CodePipelineRole.Arn
+                  - !GetAtt CFExecutionRole.Arn
+              Action:
+                - kms:Decrypt
+                - kms:DescribeKey
+                - kms:Encrypt
+                - kms:GenerateDataKey
+                - kms:GenerateDataKeyWithoutPlainText
+                - kms:ReEncrypt
+                - kms:ReEncryptTo
+                - kms:ReEncryptFrom
+                - kms:TagResource
+                - kms:CreateKey
+              Resource: '*'
+      Tags:
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref Project
+
+  CodePipelineKMSAlias:
+    Type: AWS::KMS::Alias
+    Properties:
+      AliasName: !Sub alias/goldmine/${Project}/codepipeline-key
+      TargetKeyId: !GetAtt CodePipelineKMSKey.Arn
+
+  CodePipelineS3Bucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub codepipeline-bucket-${Project}-${AWS::AccountId}
+      AccessControl: Private
+      LifecycleConfiguration:
+        Rules:
+          - Id: LccRule1-ExpireAllNoncurrentIn8Days
+            NoncurrentVersionExpirationInDays: 8
+            Prefix: ''
+            Status: Enabled
+      VersioningConfiguration:
+        Status: Enabled
+      BucketEncryption:
+        ServerSideEncryptionConfiguration :
+          -
+            ServerSideEncryptionByDefault:
+              KMSMasterKeyID: !GetAtt CodePipelineKMSKey.Arn
+              SSEAlgorithm: aws:kms
+      Tags:
+        - Key: category
+          Value: goldmine
+        - Key: project_name
+          Value: !Ref Project
+
+  CodePipelineS3BucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref CodePipelineS3Bucket
+      PolicyDocument:
+        Statement:
+          -
+            Action:
+              - s3:List*
+              - s3:Get*
+              - s3:Put*
+              - s3:Delete*
+              - s3:AbortMultipartUpload
+              - s3:RestoreObject
+              - s3:ListMultipartUploadParts
+            Effect: Allow
+            Resource:
+              - !Sub arn:aws:s3:::${CodePipelineS3Bucket}
+              - !Sub arn:aws:s3:::${CodePipelineS3Bucket}/*
+            Principal:
+              AWS:
+                - !GetAtt CodePipelineRole.Arn
+
+  CodeBuildRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Project}-CodeBuild-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              Service:
+                - codebuild.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  CodeBuildPolicy:
+    DependsOn:
+      - CFExecutionPolicy
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows CodeBuild to perform builds and deploys
+      ManagedPolicyName: !Sub ${Project}-CodeBuild-Policy
+      Roles:
+        - !Ref CodeBuildRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -  # Allow codebuild to perform encryption and decryption
+            Sid: KMSPolicy
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:GetKeyPolicy
+              - kms:List*
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:Generate*
+            Resource:
+              - !GetAtt CodePipelineKMSKey.Arn
+          -  # Allow codebuild to write to cloudwatch
+            Sid: CloudWatchLogsPermissionsForAllCodeBuildProjects
+            Effect: Allow
+            Action:
+              - logs:*
+            Resource:
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*
+              - !Sub arn:aws:logs:${AWS::Region}:${AWS::AccountId}:log-group:/aws/codebuild/*:*
+          -  # Allow codebuild to list and get objects from any bucket
+            Sid: S3BucketPolicy
+            Effect: Allow
+            Action:
+              - s3:GetBucket*
+              - s3:ListBucket*
+            Resource:
+              - !GetAtt CodePipelineS3Bucket.Arn
+              - !GetAtt ServerlessDeploymentS3Bucket.Arn
+          -  # Allow codebuild to get objects from codepipeline service buckets
+            Sid: S3ObjectPolicy
+            Effect: Allow
+            Action:
+              - s3:PutObject
+              - s3:GetObject
+              - s3:GetObjectVersion
+            Resource:
+              - !Sub ${CodePipelineS3Bucket.Arn}/*
+              - !Sub ${ServerlessDeploymentS3Bucket.Arn}/*
+          -  # Allow codebuild to access repos
+            Sid: CodeCommitAccessPolicy
+            Effect: Allow
+            Action:
+              - codecommit:*
+            Resource:
+              - !GetAtt CodeCommitRepo.Arn
+          -  # Allow code build to assume deployment role
+            Sid: AssumeDeploymentRolePolicy
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !GetAtt CFExecutionRole.Arn
+
+  CodePipelineRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Project}-CodePipeline-Role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+        -
+          Effect: Allow
+          Action:
+            - sts:AssumeRole
+          Principal:
+            Service:
+              # Only CodePipeline service can assume this role
+              # No one else can assume this role
+              - codepipeline.amazonaws.com
+
+  CodePipelinePolicy:
+    DependsOn: 
+      - CFExecutionPolicy
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: allows cloudformation to create/update/delete IAM Roles
+      ManagedPolicyName: !Sub ${Project}-CodePipeline-Policy
+      Roles:
+        - !Ref CodePipelineRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -  # Allow codepipeline to perform encryption and decryption
+            Sid: KMSPolicy
+            Effect: Allow
+            Action:
+              - kms:DescribeKey
+              - kms:GetKeyPolicy
+              - kms:List*
+              - kms:Encrypt
+              - kms:Decrypt
+              - kms:ReEncrypt*
+              - kms:Generate*
+            Resource:
+              - !GetAtt CodePipelineKMSKey.Arn
+          -  # Allow codepipeline to get from our repos
+            Sid: CodeCommitPermissions
+            Effect: Allow
+            Action:
+              - codecommit:GetBranch
+              - codecommit:GetCommit
+              - codecommit:UploadArchive
+              - codecommit:GetUploadArchiveStatus
+              - codecommit:CancelUploadArchive
+            Resource:
+              - !GetAtt CodeCommitRepo.Arn
+          -  # Allow codepipeline to list and get objects from any bucket
+            Sid: S3BucketPolicy
+            Effect: Allow
+            Action:
+              - s3:GetBucket*
+              - s3:ListBucket*
+            Resource:
+              - !GetAtt CodePipelineS3Bucket.Arn
+              - !GetAtt ServerlessDeploymentS3Bucket.Arn
+          -  # Allow codepipeline to put and get objects from codepipeline service buckets
+            Sid: S3ObjectPolicy
+            Effect: Allow
+            Action:
+              - s3:AbortMultipartUpload
+              - s3:GetObject*
+              - s3:PutObject*
+              - s3:DeleteObject*
+              - s3:RestoreObject
+              - s3:ListMultipartUploadParts
+            Resource:
+              - !Sub ${CodePipelineS3Bucket.Arn}/*
+              - !Sub ${ServerlessDeploymentS3Bucket.Arn}/*
+          -  # Allow codepipeline to pass role to codebuild
+            Sid: PassRolePolicy
+            Effect: Allow
+            Action:
+              - iam:PassRole
+            Resource:
+              - '*'
+          -  # Allow codepipeline to start codebuild
+            Sid: CodeBuildPolicy
+            Effect: Allow
+            Action:
+              - codebuild:StartBuild
+              - codebuild:BatchGetBuilds
+            Resource:
+              - !Sub "arn:aws:codebuild:${AWS::Region}:${AWS::AccountId}:project/*"
+          -  # Allow code build to assume deployment role
+            Sid: AssumeDeploymentRolePolicy
+            Effect: Allow
+            Action:
+              - sts:AssumeRole
+            Resource:
+              - !GetAtt CFExecutionRole.Arn
+          -  # To create CF stack for serverless deployment
+            Sid: CloudFormationFullAccess
+            Effect: Allow
+            Action:
+              - cloudformation:*
+            Resource: '*'
+
+  CFExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Project}-cf-execution-role
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -
+            Effect: Allow
+            Principal:
+              AWS: !Sub arn:aws:iam::${AWS::AccountId}:root
+              Service:
+                - cloudformation.amazonaws.com
+            Action:
+              - sts:AssumeRole
+
+  CFExecutionPolicy:
+    Type: AWS::IAM::ManagedPolicy
+    Properties:
+      Description: Allows pipeline in master account to deploy Lambda
+      ManagedPolicyName: !Sub ${Project}-cf-execution-policy
+      Roles:
+        - !Ref CFExecutionRole
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          -  # Allow codepipeline admin priviledges to KMS keys
+            Sid: KMSAdminPolicy
+            Effect: Allow
+            Action:
+              - kms:Create*
+              - kms:Describe*
+              - kms:Enable*
+              - kms:List*
+              - kms:Put*
+              - kms:Update*
+              - kms:Revoke*
+              - kms:Disable*
+              - kms:Get*
+              - kms:Delete*
+              - kms:TagResource
+              - kms:UntagResource
+              - kms:ScheduleKeyDeletion
+              - kms:CancelKeyDeletion
+            Resource: '*'
+          - Sid: IAMRolesPermissions
+            # Needed for creating Roles for Lambdas, EC2 instances and other services
+            Effect: Allow
+            Action:
+              - iam:Get*
+              - iam:List*
+              - iam:*Role*
+              - iam:CreatePolicy
+              - iam:DeletePolicy
+              - iam:*PolicyVersion*
+              - iam:*InstanceProfile*
+            Resource: '*'
+          - Sid: S3FullAccess
+            # To Get and Put deployment artifacts in serverless deployment bucket
+            Effect: Allow
+            Action:
+              - s3:*
+            Resource: '*'
+          - Sid: SNSAccess
+            # To Create SNS topic and subscriptions
+            Effect: Allow
+            Action:
+              - sns:List*
+              - sns:Get*
+              - sns:Set*
+              - sns:CreateTopic
+              - sns:DeleteTopic
+              - sns:Subscribe
+              - sns:Unsubscribe
+              - sns:TagResource
+              - sns:UntagResource
+            Resource: '*'
+          -  # To create CF stack for serverless deployment
+            Sid: CloudFormationFullAccess
+            Effect: Allow
+            Action:
+              - cloudformation:*
+            Resource: '*'
+          - # Lambda Full Access
+            Sid: LambdaFullAccess
+            Effect: Allow
+            Action:
+              - lambda:*
+            Resource: '*'
+          - Sid: Cloudwatch
+            # To access cloudwatch logs
+            Effect: Allow
+            Action:
+              - cloudwatch:*
+              - logs:*
+              - events:*
+            Resource: '*'
+          - # CodeDeploy Full Access for SAM deployment
+            Sid: CodeDeployFullAccess
+            Effect: Allow
+            Action:
+              - codedeploy:*
+            Resource: '*'
+
+  CloudWatchPipelineTriggerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub ${Project}-CloudWatch-Pipeline-Trigger
+      AssumeRolePolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                  - events.amazonaws.com
+            Action:
+              - sts:AssumeRole
+      Policies:
+        - PolicyName: !Sub ${Project}-CloudWatch-Pipeline-Trigger-Policy
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Effect: Allow
+                Action:
+                  - codepipeline:StartPipelineExecution
+                Resource: # Allow CloudWatch to trigger any pipeline
+                  - !Sub arn:aws:codepipeline:${AWS::Region}:${AWS::AccountId}:*
+  ############################### END PRE-REQUISITES ######################################
+
+Outputs:
+  OutCodePipeline:
+    Description: CICD Pipeline Name
+    Value: !Ref CodePipeline
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineName
+  OutCodePipelineURL:
+    Value: !Sub "https://console.aws.amazon.com/codepipeline/home?region=${AWS::Region}#/view/${CodePipeline}"
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineUrl
+  OutCodeCommitRepoARN:
+    Value: !GetAtt CodeCommitRepo.Arn
+    Description: ARN for the Serverless Lambda Api Repo
+    Export:
+      Name: !Sub Goldmine-${Project}-CodeCommitRepoArn
+  OutCodeCommitRepoURL:
+    Value: !GetAtt CodeCommitRepo.CloneUrlHttp
+    Description: The URL to be used for Cloning over HTTPS
+    Export:
+      Name: !Sub Goldmine-${Project}-CodeCommitRepoUrl
+  OutCodeBuildRoleArn:
+    Value: !GetAtt CodeBuildRole.Arn
+    Description: ARN for CodeBuild Role
+    Export:
+      Name: !Sub Goldmine-${Project}-CodeBuildRoleArn
+  OutCodePipelineRoleArn:
+    Value: !GetAtt CodePipelineRole.Arn
+    Description: ARN for CodePipeline Role
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineRoleArn
+  OutCloudWatchPipelineTriggerRoleArn:
+    Value: !GetAtt CloudWatchPipelineTriggerRole.Arn
+    Description: ARN for CloudWatch Events to trigger CodePipeline
+    Export:
+      Name: !Sub Goldmine-${Project}-CloudWatchPipelineTriggerRoleArn
+  OutCodePipelineKMSKeyArn:
+    Value: !GetAtt CodePipelineKMSKey.Arn
+    Description: ARN for Pipeline KMS Key
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineKMSKeyArn
+  OutCodePipelineS3Bucket:
+    Value: !Ref CodePipelineS3Bucket
+    Description: Name of CodePipeline S3 Bucket
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineS3BucketName
+  OutCodePipelineS3BucketArn:
+    Value: !GetAtt CodePipelineS3Bucket.Arn
+    Description: ARN of CodePipeline S3 Bucket
+    Export:
+      Name: !Sub Goldmine-${Project}-CodePipelineS3BucketArn
+  OutServerlessDeploymentS3Bucket:
+    Value: !Ref ServerlessDeploymentS3Bucket
+    Description: Name of Serverless Deployment S3 Bucket
+    Export:
+      Name: !Sub Goldmine-${Project}-ServerlessDeploymentBucketName
+  OutServerlessDeploymentS3BucketArn:
+    Value: !GetAtt ServerlessDeploymentS3Bucket.Arn
+    Description: ARN of Serverless Deployment S3 Bucket
+    Export:
+      Name: !Sub Goldmine-${Project}-ServerlessDeploymentS3BucketArn
+  OutCFExecutionRole:
+    Description: CloudFormation Execution Role ARN
+    Value: !GetAtt CFExecutionRole.Arn
+    Export:
+      Name: !Sub Goldmine-${Project}-CFExecutionRoleArn
+  OutCFExecutionPolicy:
+    Description: CloudFormation Execution Policy ARN
+    Value: !Ref CFExecutionPolicy
+    Export:
+      Name: !Sub Goldmine-${Project}-CFExecutionPolicyArn

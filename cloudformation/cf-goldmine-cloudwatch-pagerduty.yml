@@ -3,6 +3,10 @@ AWSTemplateFormatVersion: 2010-09-09
 Description: The AWS CloudFormation template for creating Cloudwatch Dashboard and Alarms.
 
 Parameters:
+  ProjectName:
+    Type: String
+    Default: cloudwatch-pagerduty
+    Description: Enter name of your project
   LambdaCodeS3BucketName:
     Type: String
     Description: S3 bucket key for lambda code zip
@@ -17,7 +21,7 @@ Parameters:
     Default: https://pagerduty-alert.com
 
 Resources:
-  FicoMonitoringTopicKmsKey:
+  PagerDutyMonitoringTopicKmsKey:
     Type: AWS::KMS::Key
     Properties: 
       Description: KMS key to encrypt messages sent to the topic
@@ -25,7 +29,7 @@ Resources:
       EnableKeyRotation: False
       KeyPolicy:
         Version: 2012-10-17
-        Id: efx-fico-monitoring-topic-key
+        Id: !Sub ${ProjectName}-monitoring-topic-key
         Statement:
           - Sid: Enable IAM User Permissions
             Effect: Allow
@@ -38,27 +42,27 @@ Resources:
             Action: kms:*
             Resource: '*'
       Tags: 
-        - Key: name
-          Value: efx-fico-monitoring-topic
+        - Key: category
+          Value: goldmine
         - Key: project_name
-          Value: FICO
+          Value: !Ref ProjectName
 
-  FicoMonitoringTopic:
+  PagerDutyMonitoringTopic:
     Type: AWS::SNS::Topic
     Properties: 
-      DisplayName: efx-fico-monitoring-topic
-      KmsMasterKeyId: !Ref FicoMonitoringTopicKmsKey
+      DisplayName: !Sub ${ProjectName}-monitoring-topic
+      KmsMasterKeyId: !Ref  PagerDutyMonitoringTopicKmsKey
       Subscription: 
         - Endpoint: !Ref PagerDutyWebhook
           Protocol: https
       Tags: 
-        - Key: name
-          Value: efx-fico-monitoring-topic
+        - Key: category
+          Value: goldmine
         - Key: project_name
-          Value: FICO
-      TopicName: efx-fico-monitoring-topic
+          Value: !Ref ProjectName
+      TopicName: !Sub ${ProjectName}-monitoring-topic
 
-  FicoMonitoringEventRule:
+  PageDutyMonitoringEventRule:
     Type: AWS::Events::Rule
     Properties: 
       Description: Rule to intercept CloudWatch alarm events
@@ -71,24 +75,24 @@ Resources:
           state:
             value: 
               - ALARM
-      Name: efx-fico-monitoring-rule
+      Name: !Sub ${ProjectName}-monitoring-rule
       State: ENABLED
       Targets: 
-        - Arn: !GetAtt FicoAlertMessageTransformerLambda.Arn
-          Id: !Ref FicoAlertMessageTransformerLambda
+        - Arn: !GetAtt PagerDutyAlertMessageTransformerLambda.Arn
+          Id: !Ref PagerDutyAlertMessageTransformerLambda
   
   PermissionForEventsToInvokeLambda: 
     Type: AWS::Lambda::Permission
     Properties: 
-      FunctionName: !Ref FicoAlertMessageTransformerLambda
+      FunctionName: !Ref PagerDutyAlertMessageTransformerLambda
       Action: lambda:InvokeFunction
       Principal: events.amazonaws.com
-      SourceArn: !GetAtt FicoMonitoringEventRule.Arn
+      SourceArn: !GetAtt PageDutyMonitoringEventRule.Arn
 
-  FicoAlertMessageTransformerLambdaRole:
+  PagerDutyAlertMessageTransformerLambdaRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: delegate-admin-efx-cloud-fico-alert-msg-transform-lambda-role
+      RoleName: !Sub ${ProjectName}-lambda-role
       AssumeRolePolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -100,12 +104,12 @@ Resources:
             Action:
               - sts:AssumeRole
 
-  FicoAlertMessageTransformerLambdaPolicy:
+  PagerDutyAlertMessageTransformerLambdaPolicy:
     Type: AWS::IAM::Policy
     Properties:
-      PolicyName: delegate-admin-efx-cloud-fico-alert-msg-transform-lambda-policy
+      PolicyName: !Sub ${ProjectName}-lambda-policy
       Roles:
-        - !Ref FicoAlertMessageTransformerLambdaRole
+        - !Ref PagerDutyAlertMessageTransformerLambdaRole
       PolicyDocument:
         Version: 2012-10-17
         Statement:
@@ -119,7 +123,11 @@ Resources:
             Action:
               - sns:Publish
             Resource:
-              - !Ref FicoMonitoringTopic
+              - !Ref PagerDutyMonitoringTopic
+          - Effect: Allow
+            Action:
+              - cloudwatch:DescribeAlarms
+            Resource: '*'
           - Effect: Allow
             Action:
               - kms:encrypt
@@ -127,42 +135,42 @@ Resources:
               - kms:ReEncrypt*
               - kms:GenerateDataKey*
               - kms:DescribeKey
-            Resource: !GetAtt FicoMonitoringTopicKmsKey.Arn
+            Resource: !GetAtt PagerDutyMonitoringTopicKmsKey.Arn
 
-  FicoAlertMessageTransformerLambda:
+  PagerDutyAlertMessageTransformerLambda:
     DependsOn:
-      - FicoAlertMessageTransformerLambdaPolicy
+      - PagerDutyAlertMessageTransformerLambdaPolicy
     Type: AWS::Lambda::Function
     Properties:
-      FunctionName: efx-fico-alert-message-transform-lambda
+      FunctionName: !Sub ${ProjectName}-lambda
       Handler: index.lambda_handler
       Runtime: python3.7
       Description: Transform alert message format and publish to SNS topic
       MemorySize: 128
       Timeout: 300
-      Role: !GetAtt FicoAlertMessageTransformerLambdaRole.Arn
-      KmsKeyArn: !GetAtt FicoMonitoringTopicKmsKey.Arn
+      Role: !GetAtt PagerDutyAlertMessageTransformerLambdaRole.Arn
+      KmsKeyArn: !GetAtt PagerDutyMonitoringTopicKmsKey.Arn
       Environment: 
         Variables:
-          SNS_TOPIC_ARN: !Ref FicoMonitoringTopic
+          SNS_TOPIC_ARN: !Ref PagerDutyMonitoringTopic
       Tags:
-        - Key: name
-          Value: efx-fico-alert-message-transform-lambda
+        - Key: category
+          Value: goldmine
         - Key: project_name
-          Value: FICO
+          Value: !Sub ${ProjectName}
       Code:
         S3Bucket: !Ref LambdaCodeS3BucketName
         S3Key: !Ref LambdaCodeS3Key
 
 Outputs:
-  OutFicoAlertMessageTransformerLambdaArn:
-    Description: Fico Alert Message Transformer Lambda ARN
-    Value: !GetAtt FicoAlertMessageTransformerLambda.Arn
+  OutPagerDutyAlertMessageTransformerLambdaArn:
+    Description: Pager Duty Alert Message Transformer Lambda ARN
+    Value: !GetAtt PagerDutyAlertMessageTransformerLambda.Arn
     Export:
-      Name: efx-FicoAlertMessageTransformerLambdaArn
+      Name: PagerDutyAlertMessageTransformerLambdaArn
 
-  OutEMRMonitoringLambdaRoleArn:
-    Description: Fico Alert Message Transformer Lambda Role ARN
-    Value: !GetAtt FicoAlertMessageTransformerLambdaRole.Arn
+  OutPagerDutyAlertMessageTransformerLambdaRoleArn:
+    Description: Pager Duty Alert Message Transformer Lambda Role ARN
+    Value: !GetAtt PagerDutyAlertMessageTransformerLambdaRole.Arn
     Export:
-      Name: efx-FicoAlertMessageTransformerLambdaRoleArn
+      Name: PagerDutyAlertMessageTransformerLambdaRoleArn

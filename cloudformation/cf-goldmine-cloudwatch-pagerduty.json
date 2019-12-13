@@ -1,5 +1,9 @@
 [
     {
+        "ParameterKey": "ProjectName",
+        "ParameterValue": "cloudwatch-pagerduty"
+    },
+    {
         "ParameterKey": "LambdaCodeS3BucketName",
         "ParameterValue": "<LambdaCodeS3BucketName>"
     },

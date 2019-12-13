@@ -1,0 +1,11 @@
+{
+    "Parameters": {
+        "ProjectName": "cloudwatch-pagerduty",
+        "Stage": "DEV",
+        "PagerDutyWebhook": "https://events.pagerduty.com/integration/1a48b5471b5e41d082a5ed4c78842049/enqueue"
+    },
+    "Tags" : {
+        "category": "goldmine",
+        "project_name": "cloudwatch-pagerduty"
+    }
+}

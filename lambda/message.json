@@ -1,8 +1,22 @@
 {
-    "Severity": "",
-    "Alarms": [],
-    "Client": "",
-    "Title": "",
-    "Description": "",
-    "Details": {}
+    "AlarmName": "",
+    "AlarmDescription": "",
+    "AWSAccount": "",
+    "NewStateValue": "",
+    "NewStateReason": "",
+    "StateChangeTime": "",
+    "Region": "",
+    "OldStateValue": "",
+    "Trigger": {
+        "MetricName": "",
+        "Namespace": "",
+        "Statistic": "",
+        "Period": null,
+        "EvaluationPeriods": null,
+        "ComparisonOperator": "",
+        "Threshold": null,
+        "Unit": null,
+        "TreatMissingData": null,
+        "Dimensions": []
+    }
 }
